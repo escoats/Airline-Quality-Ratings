@@ -1,0 +1,373 @@
+---
+title: "Final Paper: Airline Quality Ratings"
+author: "STOR 320.001 Group 3"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: cerulean
+    highlight: haddock
+    number_sections: true
+    toc: true
+    toc_depth: 5
+    toc_float:
+      collapsed: true
+  pdf_document:
+    toc: true
+    toc_depth: '5'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# necessary libraries
+library(tidyverse)
+library(class)
+library(pROC)
+library(skimr)
+library(caret)
+library(moderndive)
+library(forecast)
+library(GGally)
+library(gt)
+library(nnet)
+library(reshape2)
+library(RColorBrewer)
+library(dplyr)
+library(kableExtra)
+
+# loading in data
+ratings <- read_csv('Airline Quality Ratings.csv')
+ratings$Class <- as.factor(ratings$Class)
+```
+
+
+
+# INTRODUCTION
+
+In today's competitive airline industry, understanding what makes passengers happy and why they choose certain travel classes is crucial for success. Our project explores two key questions that can help airlines improve their services and better cater to their customers: Can we predict if a passenger will be satisfied based on their background and flight experience? And what factors influence the travel class a passenger chooses? These questions hold substantial value for both the airline and the broader world.
+
+For the owner of the data, answering these questions can provide several important benefits. Being able to predict passenger satisfaction allows airlines to offer a more personalized and proactive customer service approach. If an airline can anticipate whether a passenger will be satisfied or not, they can take steps to address any potential issues before problems arise. Therefore, the airline will have happier customers, better reviews, and stronger loyalty. Satisfied passengers are more likely to stick with the same airline and recommend it to others, which is of high value in this competitive market. In addition, understanding what drives satisfaction can help airlines make better decisions about where to invest in improving their services, leading to more efficient use of resources and higher overall customer satisfaction.
+
+Understanding why passengers choose different travel classes—like Business, Economy, or Economy Plus—also offers significant advantages for specific airlines and the broader context. For example, if an airline knows that younger travelers or business passengers prefer certain classes, they can design targeted promotions to attract specific groups to specific classes. This tactic can not only boost ticket sales but also ensure that passengers feel they are getting the best value for their money; producing long-term customer loyalty. Learning this info can also help in optimizing pricing strategies for the airline company and improving the overall booking experience for customers; this can lead to increased revenue and increased customer satisfaction overall. These questions are not just interesting for airlines but also have broader implications for understanding customer behavior in air travel. From a broader perspective, the world benefits from these insights. Improved customer satisfaction and better-fitted services contribute to a more efficient and enjoyable travel experience for passengers globally. This can lead to increased customer loyalty across the airline industry, which encourages competition and innovation. A better understanding of passenger preferences may also contribute to more sustainable practices completing business practices without overextending resources, ultimately providing a better travel experience for everyone.
+
+In our project, we aim to uncover valuable insights that can guide airlines in making smarter, more customer-focused decisions. Our findings will not only benefit airlines by helping them understand and meet passenger needs but also contribute to creating a more enjoyable travel experience for all. Let’s explore what drives passenger satisfaction and travel class choices.
+
+# DATA
+
+Our dataset, [Airline Quality Ratings](https://www.kaggle.com/datasets/mikhail1681/airline-quality-ratings), comes from Kaggle. The dataset is owned by Mikhail P., a data analyst from Russia. It is a cleaned version of a dataset from Maven Analytics, an education company that helps students gain data analysis skills. Unfortunately, we were unable to trace the data back to where and when it was originally collected. 
+
+The Airline Quality Ratings dataset contains 129,880 observations. Each observation in the dataset represents a unique passenger’s experience on a particular flight for the same airline, which means that each row in the dataset corresponds to a single passenger’s feedback regarding the flight they were on for this airline, capturing their demographic information, the context they are traveling in, and their satisfaction with various aspects of the services that the airline provides. The table below shows a few observations in the dataset:
+
+```{r, echo = F}
+airline_slice <- ratings %>%
+select(-`ID`)
+kable(head(airline_slice), format = "html", caption = "Airline Quality Ratings") %>%
+kable_styling(full_width = TRUE)
+```
+
+For our analysis, the specific variables we used for answering the questions contain information regarding the demographics and flight experience of each passenger. The dataset describes the passenger’s gender, age, reason for travel (leisure versus business), flight class (Business, Economy, or Economy Plus), and whether the passenger is a first-time or returning customer for the airline. It also contains the flight distance in miles, arrival and departure delays in minutes, and many satisfaction ratings. Satisfaction metrics were measured in discrete ratings from 1 to 5. Passengers rated aspects of their flight experience: the convenience of departure and arrival times, ease of online booking, gate location, on-board service, seat comfort, amount of legroom, plane cleanliness, quality of food and drink, and the passenger’s opinions on in-flight service, in-flight Wi-Fi and entertainment services, and baggage handling. Finally, the dataset has a Satisfaction variable with two levels: “Satisfied,” and “Neutral or Dissatisfied.” 
+
+The chart below depicts the average rating for each satisfaction metric: 
+
+```{r, echo = F}
+ratings_means <- ratings |>
+  select(-c(ID, Gender, Age, `Customer Type`, `Type of Travel`, `Class`, `Flight Distance`, `Departure Delay`, `Arrival Delay`, Satisfaction)) |>
+  summarize_all(mean) |>
+  pivot_longer(cols = everything(), names_to = "Satisfaction Metric", values_to = "Mean Rating")
+
+blues_palette <- brewer.pal(9, "Blues")[-1]
+repeated_colors <- rep(blues_palette, length.out = nrow(ratings_means))
+
+ggplot(ratings_means, aes(x = `Satisfaction Metric`, y = `Mean Rating`, fill = `Satisfaction Metric`)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Average Rating for Each Satisfaction Metric", x = "Satisfaction Metric", y = "Mean Rating") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
+  scale_fill_manual(values = repeated_colors) +
+  ylim(0, 5) +
+  theme(legend.position = "none")
+```
+
+
+# RESULTS
+
+## Question 1: Can We Predict Customer Satisfaction?
+For our first question, we wanted to investigate whether we could reliably predict a given customer’s satisfaction by using information about their demographics and their flight experience. Since `Satisfaction` is a categorical variable with two levels, `“Satisfied”` and `“Neutral or Dissatisfied”`, we decided to approach this question using the k-nearest neighbors algorithm for classification.
+
+To create the most accurate predictions possible, we wanted to use all the information at our disposal, so we used all of the numeric variables in the dataset: passenger age, flight distance, arrival delay, departure delay, and all customer satisfaction quality metrics such as seat comfort and in-flight service.
+
+Because k-nearest neighbors and cross-fold validation operations quickly become very time- and resource-consuming, it was not possible for us to perform the prediction using all 129,000 observations in the original dataset. Instead, we took a random sample of 12,000 rows of the dataset so that the calculations were manageable and still representative of the entire table. 9,600 rows of the sample were used for training, and 2,400 were used for testing.
+
+First, we used cross-fold validation to determine the best value of k to select for the most accurate predictions in a k-nearest neighbors procedure.
+
+```{r, echo = F}
+# standardizing all variables for use later in KNN
+ratings_standard <- ratings |>
+  transmute(Age = (Age - mean(Age)) / sd(Age),
+            `Flight Distance` = (`Flight Distance` - mean(`Flight Distance`)) / sd(`Flight Distance`),
+            `Departure Delay` = (`Departure Delay` - mean(`Departure Delay`)) / sd(`Departure Delay`),
+            `Arrival Delay` = (`Arrival Delay` - mean(`Arrival Delay`, na.rm = T)) / sd(`Arrival Delay`, na.rm = T),
+            `Departure and Arrival Time Convenience` = (`Departure and Arrival Time Convenience` - mean(`Departure and Arrival Time Convenience`)) / sd(`Departure and Arrival Time Convenience`),
+            `Ease of Online Booking` = (`Ease of Online Booking` - mean(`Ease of Online Booking`)) / sd(`Ease of Online Booking`),
+            `Check-in Service` = (`Check-in Service` - mean(`Check-in Service`)) / sd(`Check-in Service`),
+            `Online Boarding` = (`Online Boarding` - mean(`Online Boarding`)) / sd(`Online Boarding`),
+            `Gate Location` = (`Gate Location` - mean(`Gate Location`)) / sd(`Gate Location`),
+            `On-board Service` = (`On-board Service` - mean(`On-board Service`)) / sd(`On-board Service`),
+            `Seat Comfort` = (`Seat Comfort` - mean(`Seat Comfort`)) / sd(`Seat Comfort`),
+            `Leg Room Service` = (Age - mean(Age)) / sd(Age),
+            `Cleanliness` = (`Cleanliness` - mean(`Cleanliness`)) / sd(`Cleanliness`),
+            `Food and Drink` = (`Food and Drink` - mean(`Food and Drink`)) / sd(`Food and Drink`),
+            `In-flight Service` = (`In-flight Service`) / sd(`In-flight Service`),
+            `In-flight Wifi Service` = (`In-flight Wifi Service` - mean(`In-flight Wifi Service`)) / sd(`In-flight Wifi Service`),
+            `In-flight Entertainment` = (`In-flight Entertainment` - mean(`In-flight Entertainment`)) / sd(`In-flight Entertainment`),
+            `Baggage Handling` = (`Baggage Handling` - mean(`Baggage Handling`)) / sd(`Baggage Handling`),
+            Satisfaction = Satisfaction,
+            ID = ID) |>
+  drop_na()
+```
+
+```{r, echo=F}
+set.seed(10)
+
+filtered_data <- ratings_standard |>
+  sample_n(12000)
+train_data = filtered_data[1:9600,]
+test_data = filtered_data[9601:12000,]
+```
+
+```{r, echo=F, results = 'hide', message = F, warning = F}
+# please never ever run this again
+possible.k=1:100
+accuracy.k=rep(NA,100)
+
+for(k in 1:100){
+  cv.out=knn.cv(train=select(train_data, -c(Satisfaction, ID)),
+                cl=factor(train_data$Satisfaction, levels = c("Neutral or Dissatisfied", "Satisfied")),
+                k=k)
+  correct=mean(cv.out==factor(train_data$Satisfaction, levels = c("Neutral or Dissatisfied", "Satisfied")))
+  accuracy.k[k]=correct
+}
+```
+
+```{r, echo = F, message = F, warning = F}
+ggplot(data=tibble(possible.k,accuracy.k)) +
+  geom_line(aes(x=possible.k,y=accuracy.k),color="lightskyblue2",size=2) +
+  theme_minimal() +
+  xlab("Choice of k") +
+  ylab("Percentage of Accurate Predictions") +
+  theme(text=element_text(size=15)) +
+  ggtitle("Prediction Accuracy for Values of k")
+```
+
+As this graph shows, accuracy peaks when k-values are relatively low, and then steadily decline as k increases. Using this information, we found that the optimal k value is 7, which yielded an accuracy rate of `88.54%` in our test.
+
+Next, we applied the k-nearest neighbors model to the testing dataset with our chosen k-value of 7. By comparing actual satisfaction levels in the test set with the predicted values generated by the model, we found that `88.926%` of our predictions were correct.
+
+Finally, we wanted to further test the accuracy of our model using a receiver operating characteristic curve, or ROC. The ROC curve compares true and false positive rates to illustrate how well a model can distinguish between two classes at different decision thresholds. The area under the curve, or AUC, is a measure of the accuracy of the model. The closer the AUC value is to 1, the more accurately the model performs. Conversely, a model with an AUC value of 0.5 would be considered no better than chance at distinguishing between classes. Typically, AUC values above 0.8 are considered useful, and values above 0.9 are considered excellent.
+
+For our purposes, we defined a “positive” value to be a “Neutral or Dissatisfied” customer. A “false positive” result would mean incorrectly predicting a customer to be “Neutral or Dissatisfied”, when in reality they were satisfied with their flight.
+
+```{r, echo = F, results = 'hide'}
+best.k=which.max(accuracy.k)
+accuracy = accuracy.k[best.k]
+```
+
+```{r, echo = F}
+TEST2 = test_data |>
+          mutate(Predict = knn(train = select(train_data, -c(Satisfaction, ID)),
+                             test = select(test_data, -c(Satisfaction, ID)),
+                             cl=factor(train_data$Satisfaction,levels = c("Neutral or Dissatisfied", "Satisfied")),
+                             k=best.k))
+```
+
+```{r,echo = F, message = F}
+knn_model <- knn(train = select(train_data, -c(Satisfaction, ID)), 
+                 test = select(test_data, -c(Satisfaction, ID)), 
+                 cl = factor(train_data$Satisfaction, levels = c("Neutral or Dissatisfied", "Satisfied")),
+                 k = 7,
+                 prob = TRUE)
+probabilities <- attr(knn_model, "prob")
+probabilities <- ifelse(knn_model == "Neutral or Dissatisfied", 1 - probabilities, probabilities)
+
+roc_curve <- roc(test_data$Satisfaction, probabilities)
+```
+
+```{r, echo = F}
+roc_data <- data.frame(
+  TPR = roc_curve$sensitivities,
+  FPR = 1 - roc_curve$specificities
+)
+
+# Plot the ROC curve
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "lightskyblue2", size = 2) +
+  geom_abline(linetype = "dashed", color = "slategrey") +
+  labs(title = "ROC Curve", x = "False Positive Rate", y = "True Positive Rate") +
+  theme_minimal()
+
+```
+
+
+Using the `pROC` package, we plotted the ROC curve and calculated an AUC value of `0.9523`, which means that the model is very accurate. Using this information, we can conclude that the model is very reliable at making predictions about a customer’s satisfaction level.
+
+
+
+
+## Question 2: Which factors determine the class that a passenger chooses to fly?
+
+
+To answer this question, we employed logistic regression to model the relationship between flight class (Business, Economy, Economy Plus) and predictors such as Gender, Age, Customer Type, and Type of Travel.
+
+
+**Logistic Regression:**
+
+We began by using a multinomial logistic regression model to predict which flight class passengers are likely to choose based on factors like age, gender, customer type, and type of travel. This involved analyzing how these factors influence the decision to opt for Business, Economy, or Economy Plus class.
+
+
+```{r, echo = F, message = F, results = 'hide', include = F}
+multinom_model <- nnet::multinom(Class ~ Gender + Age + `Customer Type` + `Type of Travel`, data = ratings)
+#summary(multinom_model)
+
+coef_df <- as.data.frame(summary(multinom_model)$coefficients)
+coef_df <- coef_df %>% 
+  rownames_to_column("term") %>%
+  pivot_longer(cols = -term, names_to = "class", values_to = "estimate")
+
+```
+
+```{r, echo = F}
+ggplot(coef_df, aes(x = reorder(term, estimate), y = estimate, fill = class)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(x = "Predictor", y = "Estimate", title = "Multinomial Logistic Regression Coefficients") +
+  scale_fill_brewer(palette = "Blues") +
+  theme_minimal()
+
+```
+
+The logistic regression model achieved an overall accuracy of 74.52% in predicting flight classes, demonstrating strong performance for Business and Economy categories.
+
+
+**Data Split, Model Training, and Prediction:**
+
+Next, we divided the dataset into two parts: one for training the model and another for testing its accuracy. This split was done in an 80-20 ratio, ensuring the model learns from a large portion of the data while keeping some aside for validation purposes. We then trained the logistic regression model using the training data to predict which flight class passengers would likely choose. Afterward, we tested the model on the separate test data to see how well it predicted the actual flight classes. By comparing these predictions with the real classes, we evaluated the model's overall accuracy. To better understand the model's performance, we created a confusion matrix. This matrix visually represented the number of correct and incorrect predictions for each flight class, helping us identify where the model excels and where it faces challenges.
+
+
+```{r, warning = F, echo = F}
+set.seed(123)
+trainIndex <- createDataPartition(ratings$Class, p = .8, list = FALSE, times = 1)
+ratings_train <- ratings[trainIndex, ]
+ratings_test <- ratings[-trainIndex, ]
+# logistic regression model on training data
+logit_model_train <- glm(Class ~ Gender + Age + `Customer Type` + `Type of Travel`, 
+                         data = ratings_train, family = binomial)
+
+predicted_probabilities <- predict(logit_model_train, newdata = ratings_test, type = "response")
+
+predicted_classes <- ifelse(predicted_probabilities > 0.5, "Business", "Economy")
+
+predicted_classes <- factor(predicted_classes, levels = levels(ratings_test$Class))
+
+conf_matrix <- confusionMatrix(predicted_classes, ratings_test$Class)
+
+conf_matrix_df <- as.data.frame(conf_matrix$table)
+
+conf_matrix_df %>%
+  gt() %>%
+  tab_header(title = "Confusion Matrix for Logistic Regression Model") %>%
+  fmt_number(columns = vars(Freq), decimals = 0) %>%
+  cols_label(
+    Reference = "Actual Class",
+    Prediction = "Predicted Class",
+    Freq = "Count"
+  )
+
+```
+
+**Heatmap:**
+
+Next, we used the confusion matrix to create a heatmap, which visually shows how well the model predicted each flight class. The heatmap uses colors to highlight accurate predictions and areas where the model may need improvement, making it easier to grasp the overall performance at a glance. The model faced challenges in accurately predicting Economy Plus, as evidenced by the absence of correct predictions for this class in the confusion matrix heatmap. This highlights the need for model refinements to improve predictions for less common classes like Economy Plus.
+
+```{r, echo = F}
+colnames(conf_matrix_df) <- c("Actual", "Predicted", "Count")
+
+conf_matrix_df$Count <- as.numeric(conf_matrix_df$Count)
+
+heatmap_plot <- ggplot(conf_matrix_df, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "white", high = "deepskyblue4", mid = "lightblue", 
+                       midpoint = median(conf_matrix_df$Count), 
+                       limit = c(min(conf_matrix_df$Count), max(conf_matrix_df$Count)), 
+                       space = "Lab", name = "Count") +
+  theme_minimal() + 
+  labs(title = "Confusion Matrix Heatmap", x = "Predicted Class", y = "Actual Class")
+
+heatmap_plot 
+
+```
+
+**Predicted vs Actual Classes Bar Plot:**
+
+Finally, we illustrated the model's accuracy by creating a bar plot that compares the counts of actual versus predicted flight classes. This visual representation clearly displays how well the model performed in predicting each class, showcasing both correct and incorrect predictions for easy interpretation.
+
+
+```{r, echo = F}
+actual_vs_pred_df <- data.frame(
+  Actual = ratings_test$Class,
+  Predicted = predicted_classes
+)
+
+actual_vs_pred_percent_df <- actual_vs_pred_df %>%
+  mutate(Type = ifelse(Actual == Predicted, "Correct", "Incorrect")) %>%
+  count(Actual, Type) %>%
+  group_by(Actual) %>%
+  mutate(Percentage = n / sum(n) * 100)
+
+actual_vs_pred_plot_percent <- actual_vs_pred_percent_df %>%
+  ggplot(aes(x = Actual, y = Percentage, fill = Type)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(title = "Percentage of Correct and Incorrect Predictions by Class", 
+       x = "Class", y = "Percentage") +
+  scale_fill_manual(values = c("Correct" = "green", "Incorrect" = "skyblue")) +
+  theme_minimal()
+
+actual_vs_pred_plot_percent
+
+
+```
+
+Using logistic regression, we found that males, older passengers, returning customers, and those traveling for personal reasons tended to prefer Economy or Economy Plus over Business class, based on the model's coefficients. Visualizations such as the confusion matrix and side-by-side bar graph provided insights into the model's performance. These visuals illustrated that the correct prediction bars were significantly shorter than the incorrect prediction bars, especially for Economy Plus. This disparity underscores the model's struggle in accurately predicting less frequent flight classes, highlighting the need for further model refinements to improve accuracy for these classes.
+
+The logistic regression model we used showed an overall accuracy of 74.52% in predicting flight classes, which means it was generally correct in its predictions across different groups of passengers. However, when we look closer at the predictions for specific types of flights—like Business, Economy, and Economy Plus—the story is more detailed. The bar chart comparing our predictions to what actually happened reveals that while the model did well for Business and Economy flights, it struggled more with Economy Plus. In fact, the chart shows taller bars for incorrect predictions in Economy Plus compared to shorter bars for correct predictions. This suggests that the model had a harder time accurately predicting this less common type of flight.
+This discrepancy between the overall accuracy and the challenges with specific flight types highlights the complexity of predicting passenger choices. Even though the model was quite accurate overall, its performance varied across different types of flights. This insight is important because it helps us understand where the model needs improvement. By focusing on these specific challenges, we can work to refine the model further, making it more reliable for predicting all types of flight classes accurately in the future.
+
+
+# CONCLUSION
+In our analysis, we explored methods to model and predict a passenger’s satisfaction level and flight class. 
+
+For our first question, we aimed to determine whether we could predict a passenger's level of satisfaction using their demographics and flight experience. We found that, using the k-nearest neighbors algorithm, we were able to predict satisfaction with high accuracy. We also determined that the model was effective at producing a low rate of false positives using an ROC curve. 
+
+This model can be highly beneficial in the real world for increasing an airline's customer retention. By predicting passenger satisfaction with few errors, airlines can proactively address potential dissatisfaction. For instance, if a customer has a negative experience on a flight; the airline may choose to reach out to that customer and offer discounts, or other conciliatory approaches intended to encourage them not to switch airlines for future flights. Erroneously offering a discount to a customer who was perfectly satisfied with their flight would likely have a smaller financial impact than accidentally ignoring a disgruntled customer under the assumption that they were satisfied. In the first scenario, the passenger walks away happy, perhaps telling friends and relatives about the generous treatment they received from the airline. In the second, the passenger is left unsatisfied, and the airline risks losing them as a customer entirely. Since our model is very effective at predicting satisfaction rate, the airline can confidently apply it to improve its customer experience.
+
+
+For the second question, we used logistic regression on the 'Airline Quality Ratings' dataset to understand how factors like gender, age, customer type, and type of travel influence passengers' choices among Business, Economy, or Economy Plus class flights. We found that males, older passengers, returning customers, and those traveling for personal reasons tended to prefer Economy or Economy Plus over Business class, based on the model's coefficients.
+However, our bar chart comparing correct and incorrect predictions highlighted that the model's predictions for Economy Plus were often inaccurate.. In contrast, although predictions for Business and Economy classes were generally better, there were still notable incorrect predictions, indicating room for improvement across all classes. This highlights the need for model refinements to improve predictions, specifically for less common classes like Economy Plus.
+While our logistic regression model achieved an overall accuracy of 74.52% in predicting flight classes, it faced notable challenges in accurately predicting less common classes like Economy Plus. This underscores the importance of ongoing refinement to enhance the model's predictive capabilities across all types of flight choices.
+Once refined, this model could be instrumental in determining target demographics for an airline's marketing strategy.
+ Since business class tickets generally cost more, an airline looking to increase profits by selling more business seats might target females, younger passengers, or those traveling for business reasons in their advertising. Additionally, the model could be further expanded by including first class seats to provide a more comprehensive analysis of passenger preferences across all available classes.
+
+
+Our findings for both questions underscore the significant influence of demographic and travel-related factors on passenger satisfaction and travel class preferences. For future modeling, enhancing predictive accuracy could involve integrating additional variables such as income level, booking timing, and travel frequency. Addressing class imbalance and incorporating external data sources like economic trends or weather conditions could further refine predictions and provide deeper insights into passenger behavior. Continuous validation and refinement of both models will be essential to ensure they effectively predict passenger satisfaction and passenger preferences for flight classes.
+
+
+
+
+# SOURCES
+Çorbacıoğlu, Ş. K., & Aksel, G. (2023). Receiver operating characteristic curve analysis in diagnostic accuracy studies: A guide to interpreting the area under the curve value. Turkish journal of emergency medicine, 23(4), 195–198. https://doi.org/10.4103/tjem.tjem_182_23
+
+Google Machine Learning Education (Ed.). (2022). Classification: ROC Curve and AUC. Google for Developers. https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc
+
+
+
+
+
